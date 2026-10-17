@@ -1,0 +1,24 @@
+{
+  "name": "turnsignal",
+  "version": "0.6.5",
+  "mcpName": "ai.turnsignal/turnsignal",
+  "description": "Crash-proof Playwright reporter and CLI: know if your change broke the tests, which tests are flaky, and which never reported.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./package.json": "./package.json"
+  },
+  "bin": { "turnsignal": "dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "peerDependencies": { "@playwright/test": ">=1.45.0" },
+  "peerDependenciesMeta": { "@playwright/test": { "optional": true } },
+  "keywords": ["playwright", "playwright-reporter", "reporter", "test-reporting", "test-results", "flaky-tests", "flaky", "ci", "github-actions", "dashboard", "e2e", "testing", "mcp"],
+  "homepage": "https://turnsignal.ai",
+  "bugs": { "url": "https://turnsignal.ai/docs", "email": "hello@turnsignal.ai" },
+  "repository": { "type": "git", "url": "git+https://github.com/sekharsdet/reportee.git", "directory": "packages/turnsignal" },
+  "scripts": { "build": "node scripts/build.mjs", "prepublishOnly": "node scripts/build.mjs" }
+}

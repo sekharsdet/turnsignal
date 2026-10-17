@@ -1,0 +1,43 @@
+{
+  "name": "@reportee/playwright",
+  "version": "0.1.0",
+  "description": "Crash-proof Playwright reporter for Reportee. Never breaks your CI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./spool": {
+      "types": "./dist/spool.d.ts",
+      "default": "./dist/spool.js"
+    },
+    "./sender": {
+      "types": "./dist/sender.d.ts",
+      "default": "./dist/sender.js"
+    },
+    "./env": {
+      "types": "./dist/env.d.ts",
+      "default": "./dist/env.js"
+    },
+    "./artifacts": {
+      "types": "./dist/artifacts.d.ts",
+      "default": "./dist/artifacts.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@reportee/shared": "0.1.0"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.45.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

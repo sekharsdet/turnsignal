@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.turnsignal/turnsignal",
+  "title": "TurnSignal for Playwright",
+  "description": "Read-only Playwright CI results for agents: new vs known failures, flaky tests, test history.",
+  "websiteUrl": "https://turnsignal.ai",
+  "version": "0.6.5",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "turnsignal",
+      "version": "0.6.5",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "mcp" }],
+      "environmentVariables": [
+        {
+          "name": "TURNSIGNAL_TOKEN",
+          "description": "Project token from app.turnsignal.ai (read-only use)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "TURNSIGNAL_API_URL",
+          "description": "Only for a self-hosted server (default https://app.turnsignal.ai)",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

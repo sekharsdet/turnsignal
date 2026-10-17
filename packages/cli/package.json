@@ -1,0 +1,26 @@
+{
+  "name": "@reportee/cli",
+  "version": "0.1.0",
+  "description": "Reportee CLI: recover spooled results and diagnose setup.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "reportee": "dist/bin.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@babel/parser": "^7.29.9",
+    "@reportee/playwright": "0.1.0",
+    "@reportee/shared": "0.1.0"
+  }
+}
