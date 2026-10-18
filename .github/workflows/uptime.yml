@@ -1,0 +1,29 @@
+# Uptime check of the hosted service, every 15 minutes. Runs from this public repository because its
+# GitHub Actions minutes are free. A failed run is emailed by GitHub to whoever last changed this
+# schedule, so an outage of app.turnsignal.ai is noticed even when nobody is looking.
+name: uptime
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # app only: no database query, so the database can stay suspended
+    - cron: '7 */6 * * *' # also the database, four times a day
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: App responds (/healthz)
+        run: curl -fsS --retry 3 --retry-delay 10 --max-time 20 https://app.turnsignal.ai/healthz
+      - name: Database reachable (/readyz)
+        # Only every 6 hours: each check wakes a suspended database for a few minutes.
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '7 */6 * * *'
+        run: curl -fsS --retry 3 --retry-delay 15 --max-time 30 https://app.turnsignal.ai/readyz
+      - name: Sign-in page renders
+        run: curl -fsS --max-time 20 https://app.turnsignal.ai/login | grep -q "Sign in to TurnSignal"
+      - name: Website responds
+        run: curl -fsS --max-time 20 -o /dev/null https://turnsignal.ai/
