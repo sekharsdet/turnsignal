@@ -6,7 +6,8 @@
 // shards, GitLab, an ESM project, 10 repeated runs (the Windows exit-127 regression), and the CLI
 // (doctor, run, analyze, mcp). A stand-in API records what arrives. Browser-free: no browser download.
 //
-// Usage: TARBALL=path/to/turnsignal-x.y.z.tgz [PW_VERSION=1.45.0|latest] [REPEAT=10] node simulate.mjs
+// Usage: TARBALL=path/to/turnsignal-x.y.z.tgz [PW_VERSION=1.45.0|latest] [PM=npm|pnpm|yarn] [REPEAT=10] node simulate.mjs
+// PM picks the customer's package manager (pnpm 9 and yarn 1 run through npx, nothing global needed).
 // Plain Node 18+ JavaScript, no dependencies. Exit code 0 only if every check passed.
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -16,6 +17,11 @@ import path from 'node:path';
 
 const TARBALL = path.resolve(process.env.TARBALL ?? process.argv[2] ?? '');
 const PW = process.env.PW_VERSION || 'latest';
+const PM = process.env.PM || 'npm';
+if (!['npm', 'pnpm', 'yarn'].includes(PM)) {
+  console.error('PM must be npm, pnpm or yarn.');
+  process.exit(2);
+}
 const REPEAT = Number(process.env.REPEAT || 10);
 const KEEP = process.env.KEEP === '1';
 const TOKEN = 'tsk_compat_token_0123456789';
@@ -141,8 +147,14 @@ function makeProject(name, { esm = false } = {}) {
   writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: name.replace(/\W+/g, '-').toLowerCase(), private: true, ...(esm ? { type: 'module' } : {}) }, null, 2));
   writeFileSync(path.join(dir, 'playwright.config.ts'), CONFIG);
   writeFileSync(path.join(dir, 'tests', 'app.spec.ts'), SPEC);
-  const r = sh('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `@playwright/test@${PW}`, TARBALL], dir);
-  check(`${name}: npm install @playwright/test@${PW} + turnsignal tarball`, r.status === 0, r.status === 0 ? '' : (r.stderr || r.stdout || String(r.error)).slice(-400));
+  const tarball = `file:${TARBALL.replace(/\\/g, '/')}`;
+  const r =
+    PM === 'npm'
+      ? sh('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `@playwright/test@${PW}`, TARBALL], dir)
+      : PM === 'pnpm'
+        ? sh('npx', ['-y', 'pnpm@9', 'add', `@playwright/test@${PW}`, tarball], dir)
+        : sh('npx', ['-y', 'yarn@1', 'add', '--non-interactive', '--no-lockfile', `@playwright/test@${PW}`, tarball], dir);
+  check(`${name}: ${PM} install @playwright/test@${PW} + turnsignal tarball`, r.status === 0, r.status === 0 ? '' : (r.stderr || r.stdout || String(r.error)).slice(-400));
   if (r.status !== 0) return undefined;
   const pwVersion = JSON.parse(readFileSync(path.join(dir, 'node_modules/@playwright/test/package.json'), 'utf8')).version;
   return { dir, pwVersion, pwCli: path.join(dir, 'node_modules/@playwright/test/cli.js'), tsCli: path.join(dir, 'node_modules/turnsignal/dist/cli.js') };
@@ -191,7 +203,7 @@ const spoolText = (p) => {
 const clearSpool = (p) => rmSync(path.join(p.dir, '.turnsignal'), { recursive: true, force: true });
 
 // ---------- scenarios ----------
-console.log(`turnsignal compat: node ${process.version} on ${process.platform}/${process.arch}, Playwright ${PW}, project root "${root}"`);
+console.log(`turnsignal compat: node ${process.version} on ${process.platform}/${process.arch}, ${PM}, Playwright ${PW}, project root "${root}"`);
 try {
   const p = makeProject('cjs project');
   if (p) {
@@ -295,8 +307,14 @@ try {
     check('cli --help: exit 0', r.status === 0 && /upload/.test(r.out), `got ${r.status}`);
     r = await ts(p, ['doctor'], c.env);
     check('cli doctor: token valid, API reachable', /Token valid/.test(r.out) && !/✗|FAIL/i.test(r.out.split('\n').filter((l) => /Token valid|API reachable/.test(l)).join('\n')), r.out.slice(-300));
-    const npx = sh('npx', ['--no-install', 'turnsignal', '--help'], p.dir, c.env);
-    check('cli via npx bin shim: exit 0', npx.status === 0, `got ${npx.status}: ${(npx.stderr || '').slice(-200)}`);
+    // The way customers call it with each package manager (exercises the bin shim on Windows).
+    const npx =
+      PM === 'npm'
+        ? sh('npx', ['--no-install', 'turnsignal', '--help'], p.dir, c.env)
+        : PM === 'pnpm'
+          ? sh('npx', ['-y', 'pnpm@9', 'exec', 'turnsignal', '--help'], p.dir, c.env)
+          : sh('npx', ['-y', 'yarn@1', '--silent', 'turnsignal', '--help'], p.dir, c.env);
+    check(`cli via ${PM} bin shim: exit 0`, npx.status === 0, `got ${npx.status}: ${(npx.stderr || '').slice(-200)}`);
     r = await ts(p, ['run', '--', process.execPath, p.pwCli, 'test', '--grep', '@fail'], c.env);
     check('cli run: test exit code 1 passed through', r.status === 1, `got ${r.status}`);
     r = await ts(p, ['run', '--', process.execPath, p.pwCli, 'test', '--grep', '@pass'], ciEnv().env);
@@ -340,6 +358,6 @@ try {
 }
 
 const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed (node ${process.version}, ${process.platform}, Playwright ${PW})`);
+console.log(`\n${results.length - failed.length}/${results.length} checks passed (node ${process.version}, ${process.platform}, ${PM}, Playwright ${PW})`);
 for (const f of failed) console.log(`  FAILED: ${f.name}  ${f.detail}`);
 process.exitCode = failed.length ? 1 : 0;
