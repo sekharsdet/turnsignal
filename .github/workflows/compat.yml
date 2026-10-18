@@ -1,0 +1,45 @@
+name: compat
+# Customer simulation (packages/turnsignal/test/compat/simulate.mjs): the packed package in fresh
+# Playwright projects on every OS, Node version and the oldest/newest supported Playwright.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime:
+          - { node: 18, playwright: 1.45.0 }
+          - { node: 20, playwright: latest }
+          - { node: 22, playwright: latest }
+          - { node: 24, playwright: latest }
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} · node ${{ matrix.runtime.node }} · playwright ${{ matrix.runtime.playwright }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and pack the package
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm run package
+          cd packages/turnsignal && npm pack --pack-destination "$RUNNER_TEMP"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.runtime.node }}
+      - name: Simulate a customer's CI
+        shell: bash
+        env:
+          PW_VERSION: ${{ matrix.runtime.playwright }}
+          REPEAT: '5'
+        run: TARBALL="$(ls "$RUNNER_TEMP"/turnsignal-*.tgz)" node packages/turnsignal/test/compat/simulate.mjs
