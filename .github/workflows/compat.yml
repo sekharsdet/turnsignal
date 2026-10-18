@@ -73,3 +73,32 @@ jobs:
           PW_VERSION: latest
           REPEAT: '3'
         run: TARBALL="$(ls "$RUNNER_TEMP"/turnsignal-*.tgz)" node packages/turnsignal/test/compat/simulate.mjs
+
+  # A real browser: a failing Chromium test's screenshot, video and trace must upload.
+  browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} · chromium · node 22 · playwright latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and pack the package
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm run package
+          cd packages/turnsignal && npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Simulate a customer's CI with a real browser
+        shell: bash
+        env:
+          BROWSER: '1'
+          PW_VERSION: latest
+          REPEAT: '2'
+        run: TARBALL="$(ls "$RUNNER_TEMP"/turnsignal-*.tgz)" node packages/turnsignal/test/compat/simulate.mjs
