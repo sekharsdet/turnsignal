@@ -19,6 +19,6 @@
   "keywords": ["playwright", "playwright-reporter", "reporter", "test-reporting", "test-results", "flaky-tests", "flaky", "ci", "github-actions", "dashboard", "e2e", "testing", "mcp"],
   "homepage": "https://turnsignal.ai",
   "bugs": { "url": "https://turnsignal.ai/docs", "email": "hello@turnsignal.ai" },
-  "repository": { "type": "git", "url": "git+https://github.com/sekharsdet/reportee.git", "directory": "packages/turnsignal" },
+  "repository": { "type": "git", "url": "git+https://github.com/sekharsdet/turnsignal.git", "directory": "packages/turnsignal" },
   "scripts": { "build": "node scripts/build.mjs", "prepublishOnly": "node scripts/build.mjs" }
 }
