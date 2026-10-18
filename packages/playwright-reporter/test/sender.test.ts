@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import https from 'node:https';
+import net, { type AddressInfo } from 'node:net';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Sender, postJson, proxyFor } from '../src/sender.js';
 import type { ReporterEvent } from '@reportee/shared';
@@ -145,4 +151,64 @@ describe('proxy support', () => {
       proxy.close();
     }
   });
+
+  // Regression (2026-10-18): the CONNECT tunnel was opened but never used (Node ignores a request's
+  // createConnection when an agent is set), so behind a proxy-only network nothing was delivered.
+  // The API host exists only inside this proxy, so a 200 proves the tunnel carried the request, and
+  // the TLS certificate is verified for that host name. Needs openssl for a throwaway certificate.
+  const openssl = spawnSync('openssl', ['version']).status === 0;
+  it.skipIf(!openssl)('sends HTTPS requests and uploads through a CONNECT tunnel, verifying the certificate', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'ts-proxy-'));
+    const key = path.join(dir, 'key.pem');
+    const cert = path.join(dir, 'cert.pem');
+    const gen = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '2', '-subj', '/CN=api.proxied.test', '-addext', 'subjectAltName=DNS:api.proxied.test'], { env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
+    expect(gen.status).toBe(0);
+    const seen: string[] = [];
+    const api = https.createServer({ key: readFileSync(key), cert: readFileSync(cert) }, (req, res) => {
+      req.resume();
+      req.on('end', () => {
+        seen.push(`${req.method} ${req.url}`);
+        res.writeHead(200).end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((r) => api.listen(0, '127.0.0.1', r));
+    const tunnels: string[] = [];
+    const proxy = http.createServer();
+    proxy.on('connect', (req, client, head) => {
+      tunnels.push(`${req.url} ${req.headers['proxy-authorization'] ?? ''}`);
+      const upstream = net.connect((api.address() as AddressInfo).port, '127.0.0.1', () => {
+        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length) upstream.write(head);
+        upstream.pipe(client);
+        client.pipe(upstream);
+      });
+      upstream.on('error', () => client.destroy());
+      client.on('error', () => upstream.destroy());
+    });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+    const apiUrl = `https://api.proxied.test:${(api.address() as AddressInfo).port}`;
+    // NODE_EXTRA_CA_CERTS is only read at process start, so the client runs in a child process.
+    const sender = pathToFileURL(path.resolve(__dirname, '../dist/sender.js')).href;
+    const script = `const { postJson, putFile } = await import(${JSON.stringify(sender)});
+      const a = await postJson(${JSON.stringify(`${apiUrl}/v1/ingest`)}, 't', { x: 1 }, 5000);
+      const b = await putFile(${JSON.stringify(`${apiUrl}/upload/1`)}, {}, { buffer: new Uint8Array([1, 2, 3]) }, 5000);
+      console.log(JSON.stringify([a, b]));`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, HTTPS_PROXY: `http://ci:p%40ss@127.0.0.1:${(proxy.address() as AddressInfo).port}`, NO_PROXY: '', NODE_EXTRA_CA_CERTS: cert },
+    });
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (out += c));
+    await new Promise((r) => child.on('close', r));
+    try {
+      expect(JSON.parse(out.trim().split('\n').pop()!)).toEqual([{ status: 200, text: '{"ok":true}' }, { status: 200 }]);
+      expect(seen).toEqual(['POST /v1/ingest', 'PUT /upload/1']);
+      const auth = `Basic ${Buffer.from('ci:p@ss').toString('base64')}`;
+      expect(tunnels).toEqual([`api.proxied.test:${(api.address() as AddressInfo).port} ${auth}`, `api.proxied.test:${(api.address() as AddressInfo).port} ${auth}`]);
+    } finally {
+      api.close();
+      proxy.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

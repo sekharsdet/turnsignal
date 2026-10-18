@@ -104,6 +104,20 @@ export function detectCi(env: Env = process.env): CiInfo {
       commit: env.GIT_COMMIT,
     });
   }
+  if (env.BITBUCKET_PIPELINE_UUID || env.BITBUCKET_BUILD_NUMBER) {
+    // The pipeline UUID is shared by its parallel steps and unique across repositories.
+    const id = env.BITBUCKET_PIPELINE_UUID || env.BITBUCKET_BUILD_NUMBER;
+    return pick({
+      provider: 'bitbucket',
+      runKey: `bitbucket:${id}`,
+      buildId: env.BITBUCKET_BUILD_NUMBER,
+      buildUrl: env.BITBUCKET_REPO_FULL_NAME && env.BITBUCKET_BUILD_NUMBER
+        ? `https://bitbucket.org/${env.BITBUCKET_REPO_FULL_NAME}/pipelines/results/${env.BITBUCKET_BUILD_NUMBER}`
+        : undefined,
+      branch: env.BITBUCKET_BRANCH,
+      commit: env.BITBUCKET_COMMIT,
+    });
+  }
   return pick({ provider: env.CI ? 'unknown-ci' : 'local' });
 }
 

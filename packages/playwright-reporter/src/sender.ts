@@ -82,6 +82,19 @@ function tunnel(proxy: URL, target: URL, timeoutMs: number): Promise<import('nod
 }
 
 /**
+ * A single-use agent whose only connection is the proxy tunnel. Node ignores a request's own
+ * `createConnection` whenever an agent is in play, and `agent: false` creates one, so the tunnel has
+ * to come from the agent itself. Otherwise Node connects straight to the API (DNS lookup and all) and
+ * the proxy is bypassed: behind a proxy-only network nothing was delivered (fixed 2026-10-18).
+ * keepAlive off and `connection: close`: nothing is pooled (see postJson).
+ */
+function tunnelAgent(socket: import('node:net').Socket, servername: string): https.Agent {
+  const agent = new https.Agent({ keepAlive: false, maxSockets: 1 });
+  (agent as unknown as { createConnection: () => tls.TLSSocket }).createConnection = () => tls.connect({ socket, servername });
+  return agent;
+}
+
+/**
  * Plain node:http with no connection pooling, NOT global fetch: undici's pooled sockets can still
  * be closing when Playwright calls process.exit(), which aborts Node on Windows (libuv
  * UV_HANDLE_CLOSING assertion) and turns a green run into exit code 127. Never throws.
@@ -125,13 +138,9 @@ export function postJson(
         let req: http.ClientRequest;
         if (proxy && target.protocol === 'https:') {
           const socket = await tunnel(proxy, target, timeoutMs);
-          req = https.request(target, {
-            method: 'POST',
-            headers,
-            timeout: timeoutMs,
-            agent: false,
-            createConnection: () => tls.connect({ socket, servername: target.hostname }),
-          }, onResponse);
+          const agent = tunnelAgent(socket, target.hostname);
+          req = https.request(target, { method: 'POST', headers, timeout: timeoutMs, agent }, onResponse);
+          req.on('close', () => agent.destroy());
         } else if (proxy) {
           // Plain HTTP through a proxy: absolute-form request to the proxy.
           req = http.request(
@@ -332,7 +341,9 @@ export function putFile(
         let req: http.ClientRequest;
         if (proxy && target.protocol === 'https:') {
           const socket = await tunnel(proxy, target, idleTimeoutMs);
-          req = https.request(target, { method: 'PUT', headers: h, timeout: idleTimeoutMs, agent: false, createConnection: () => tls.connect({ socket, servername: target.hostname }) }, onResponse);
+          const agent = tunnelAgent(socket, target.hostname);
+          req = https.request(target, { method: 'PUT', headers: h, timeout: idleTimeoutMs, agent }, onResponse);
+          req.on('close', () => agent.destroy());
         } else if (proxy) {
           req = http.request(
             { host: proxy.hostname, port: proxy.port || 80, method: 'PUT', path: target.href, headers: { ...h, host: target.host, ...proxyAuth(proxy) }, timeout: idleTimeoutMs, agent: false },

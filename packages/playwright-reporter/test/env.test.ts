@@ -37,6 +37,16 @@ describe('job selection from the Playwright CLI (ADR-018)', () => {
     expect(a1.runKey).toBe('github:42');
     expect(a2.runKey).toBe(a1.runKey);
   });
+
+  it('Bitbucket Pipelines: parallel steps of one pipeline share a run, with branch, commit and link', () => {
+    const base = { CI: 'true', BITBUCKET_PIPELINE_UUID: '{8a7f-uuid}', BITBUCKET_BUILD_NUMBER: '17', BITBUCKET_REPO_FULL_NAME: 'acme/web', BITBUCKET_BRANCH: 'feature/x', BITBUCKET_COMMIT: 'abc123' };
+    const s0 = detectCi({ ...base, BITBUCKET_PARALLEL_STEP: '0', BITBUCKET_PARALLEL_STEP_COUNT: '2' });
+    const s1 = detectCi({ ...base, BITBUCKET_PARALLEL_STEP: '1', BITBUCKET_PARALLEL_STEP_COUNT: '2' });
+    expect(s0).toMatchObject({ provider: 'bitbucket', runKey: 'bitbucket:{8a7f-uuid}', buildId: '17', branch: 'feature/x', commit: 'abc123', buildUrl: 'https://bitbucket.org/acme/web/pipelines/results/17' });
+    expect(s1.runKey).toBe(s0.runKey);
+    // Before this, Bitbucket was "unknown-ci" with a random run key per step: one pipeline, many runs.
+    expect(detectCi({ CI: 'true' }).provider).toBe('unknown-ci');
+  });
 });
 
 describe('API URL (ADR-028)', () => {

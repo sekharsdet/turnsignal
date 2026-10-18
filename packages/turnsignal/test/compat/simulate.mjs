@@ -3,14 +3,19 @@
 // Installs the packed tarball into fresh Playwright projects outside any workspace (in a path with spaces)
 // and runs them through what a customer's CI can hit: pass/fail/flaky/timeout/worker crash, secrets in
 // errors, no token, API down / 401 / 500 / hanging / connection reset, recovery with `turnsignal upload`,
-// shards, GitLab, an ESM project, 10 repeated runs (the Windows exit-127 regression), and the CLI
-// (doctor, run, analyze, mcp). A stand-in API records what arrives. Browser-free: no browser download.
+// shards, GitLab/CircleCI/Buildkite/Azure/Jenkins/Bitbucket, an HTTPS API behind a corporate proxy
+// (CONNECT, with and without proxy credentials), an ESM project, repeated runs (the Windows exit-127
+// regression), and the CLI (doctor, run, analyze, mcp). A stand-in API records what arrives.
+// Browser-free by default; BROWSER=1 adds a Chromium test whose screenshot, video and trace must upload.
 //
-// Usage: TARBALL=path/to/turnsignal-x.y.z.tgz [PW_VERSION=1.45.0|latest] [PM=npm|pnpm|yarn] [REPEAT=10] node simulate.mjs
+// Usage: TARBALL=path/to/turnsignal-x.y.z.tgz [PW_VERSION=1.45.0|latest] [PM=npm|pnpm|yarn] [REPEAT=10] [BROWSER=1] node simulate.mjs
 // PM picks the customer's package manager (pnpm 9 and yarn 1 run through npx, nothing global needed).
+// The proxy scenario needs `openssl` on PATH for a throwaway certificate (it is skipped, and says so, without).
 // Plain Node 18+ JavaScript, no dependencies. Exit code 0 only if every check passed.
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { connect } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,6 +29,7 @@ if (!['npm', 'pnpm', 'yarn'].includes(PM)) {
 }
 const REPEAT = Number(process.env.REPEAT || 10);
 const KEEP = process.env.KEEP === '1';
+const BROWSER = process.env.BROWSER === '1';
 const TOKEN = 'tsk_compat_token_0123456789';
 const SECRET = 'compat-s3cr3t-value-98765';
 const win = process.platform === 'win32';
@@ -40,12 +46,14 @@ function check(name, ok, detail = '') {
 }
 
 // ---------- stand-in API ----------
-const api = { mode: 'ok', events: new Map(), batches: [], requests: 0, sockets: new Set() };
-const server = createServer((req, res) => {
+const api = { mode: 'ok', events: new Map(), batches: [], requests: 0, sockets: new Set(), presigned: [], puts: new Map(), completed: [] };
+function handle(req, res) {
   api.requests++;
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
+    const raw = Buffer.concat(chunks);
+    const body = raw.toString('utf8');
     const json = (status, obj) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(obj));
@@ -53,7 +61,29 @@ const server = createServer((req, res) => {
     const authed = req.headers.authorization === `Bearer ${TOKEN}`;
     if (req.method === 'GET' && req.url === '/healthz') return json(200, { ok: true });
     if (req.method === 'GET' && req.url === '/v1/whoami')
-      return authed ? json(200, { project: 'web', projectId: 'p1', artifacts: { enabled: false, policy: 'failures' } }) : json(401, { error: 'invalid token' });
+      return authed ? json(200, { project: 'web', projectId: 'p1', artifacts: { enabled: true, policy: 'failures' } }) : json(401, { error: 'invalid token' });
+    // Artifacts: presign hands out upload URLs on this same server (its own host, so HTTPS-behind-proxy
+    // uploads go through the proxy too), PUT stores the bytes, complete records what was finished.
+    if (req.method === 'POST' && req.url === '/v1/artifacts/presign') {
+      if (!authed) return json(401, { error: 'invalid token' });
+      const items = JSON.parse(body).items.map((it) => {
+        const id = `a${api.presigned.length + 1}`;
+        api.presigned.push({ id, ...it });
+        const proto = req.socket.encrypted ? 'https' : 'http';
+        return { accepted: true, id, url: `${proto}://${req.headers.host}/_put/${id}`, headers: { 'content-type': it.contentType } };
+      });
+      return json(200, { items });
+    }
+    if (req.method === 'PUT' && req.url?.startsWith('/_put/')) {
+      api.puts.set(req.url.slice(6), raw);
+      res.writeHead(200);
+      return res.end();
+    }
+    if (req.method === 'POST' && req.url === '/v1/artifacts/complete') {
+      if (!authed) return json(401, { error: 'invalid token' });
+      api.completed.push(...JSON.parse(body).ids);
+      return json(200, { ok: true });
+    }
     if (req.method === 'POST' && req.url === '/v1/ingest') {
       if (api.mode === 'hang') return; // never answers; the socket is destroyed at shutdown
       if (api.mode === 'reset') return req.socket.destroy();
@@ -71,14 +101,15 @@ const server = createServer((req, res) => {
       api.events.set(batch.runKey, list);
       return json(200, { ok: true, accepted: batch.events?.length ?? 0 });
     }
-    if (req.method === 'POST' && req.url?.startsWith('/v1/artifacts/')) return json(404, { error: 'no artifact storage' });
     json(404, { error: 'not found' });
   });
-});
-server.on('connection', (s) => {
-  api.sockets.add(s);
-  s.on('close', () => api.sockets.delete(s));
-});
+}
+const track = (srv) =>
+  srv.on('connection', (s) => {
+    api.sockets.add(s);
+    s.on('close', () => api.sockets.delete(s));
+  });
+const server = track(createServer(handle));
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const API_URL = `http://127.0.0.1:${server.address().port}`;
 // A port nobody listens on: "API down".
@@ -125,13 +156,20 @@ test('times out @timeout', async () => {
 test('worker crash @crash', async () => {
   process.exit(137);
 });
+test('real browser fails @browser', async ({ page }) => {
+  await page.setContent('<h1>Checkout</h1>');
+  await expect(page.locator('h1')).toHaveText('Paid', { timeout: 1000 });
+});
 `;
+// COMPAT_BROWSER: record evidence like a customer would, so failed browser tests have a screenshot,
+// a video and a trace to upload.
 const CONFIG = `import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './tests',
   retries: 1,
   workers: 2,
   reporter: [['list'], ['turnsignal']],
+  use: process.env.COMPAT_BROWSER ? { screenshot: 'only-on-failure', video: 'retain-on-failure', trace: 'retain-on-failure' } : {},
 });
 `;
 
@@ -165,19 +203,26 @@ let runSeq = 0;
 function ciEnv({ provider = 'github', token = TOKEN, apiUrl = API_URL, extra = {} } = {}) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (/^(TURNSIGNAL_|REPORTEE_|GITHUB_|GITLAB_|CI_|CIRCLE|BUILDKITE|JENKINS|BITBUCKET|TF_BUILD|SYSTEM_|BUILD_|RUNNER_|ACTIONS_)/i.test(k) || k === 'CI') continue;
+    if (/^(TURNSIGNAL_|REPORTEE_|GITHUB_|GITLAB_|CI_|CIRCLE|BUILDKITE|JENKINS|BITBUCKET|TF_BUILD|SYSTEM_|BUILD_|RUNNER_|ACTIONS_|HTTPS?_PROXY$|NO_PROXY$|NODE_EXTRA_CA_CERTS$)/i.test(k) || k === 'CI') continue;
     env[k] = v;
   }
   const id = `${Date.now()}${++runSeq}`;
-  if (provider === 'github')
-    Object.assign(env, { CI: 'true', GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: id, GITHUB_RUN_ATTEMPT: '1', GITHUB_REF_NAME: 'main', GITHUB_SHA: `sha${id}`, GITHUB_REPOSITORY: 'acme/web', GITHUB_SERVER_URL: 'https://github.com', GITHUB_JOB: 'tests' });
-  if (provider === 'gitlab')
-    Object.assign(env, { CI: 'true', GITLAB_CI: 'true', CI_PIPELINE_ID: id, CI_COMMIT_REF_NAME: 'main', CI_COMMIT_SHA: `sha${id}`, CI_JOB_NAME: 'e2e' });
+  // Each provider's own variables (from its docs), as its CI would set them.
+  const providers = {
+    github: { GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: id, GITHUB_RUN_ATTEMPT: '1', GITHUB_REF_NAME: 'main', GITHUB_SHA: `sha${id}`, GITHUB_REPOSITORY: 'acme/web', GITHUB_SERVER_URL: 'https://github.com', GITHUB_JOB: 'tests' },
+    gitlab: { GITLAB_CI: 'true', CI_PIPELINE_ID: id, CI_COMMIT_REF_NAME: 'main', CI_COMMIT_SHA: `sha${id}`, CI_JOB_NAME: 'e2e' },
+    circleci: { CIRCLECI: 'true', CIRCLE_WORKFLOW_ID: id, CIRCLE_BRANCH: 'main', CIRCLE_SHA1: `sha${id}`, CIRCLE_BUILD_URL: `https://circleci.com/gh/acme/web/${id}` },
+    buildkite: { BUILDKITE: 'true', BUILDKITE_BUILD_ID: id, BUILDKITE_BRANCH: 'main', BUILDKITE_COMMIT: `sha${id}`, BUILDKITE_BUILD_URL: `https://buildkite.com/acme/web/builds/${id}` },
+    azure: { TF_BUILD: 'True', BUILD_BUILDID: id, BUILD_SOURCEBRANCHNAME: 'main', BUILD_SOURCEVERSION: `sha${id}` },
+    jenkins: { JENKINS_URL: 'https://jenkins.acme.example/', BUILD_TAG: id, BUILD_NUMBER: '7', BUILD_URL: `https://jenkins.acme.example/job/web/7/`, GIT_BRANCH: 'origin/main', GIT_COMMIT: `sha${id}` },
+    bitbucket: { BITBUCKET_PIPELINE_UUID: `{${id}}`, BITBUCKET_BUILD_NUMBER: '17', BITBUCKET_REPO_FULL_NAME: 'acme/web', BITBUCKET_BRANCH: 'main', BITBUCKET_COMMIT: `sha${id}` },
+  };
+  Object.assign(env, { CI: 'true' }, providers[provider]);
   if (token) env.TURNSIGNAL_TOKEN = token;
   if (apiUrl) env.TURNSIGNAL_API_URL = apiUrl;
   env.MY_API_SECRET = SECRET;
   Object.assign(env, extra);
-  return { env, runKey: `${provider}:${id}` };
+  return { env, runKey: `${provider}:${provider === 'bitbucket' ? `{${id}}` : id}` };
 }
 
 function run(cmd, args, cwd, env, timeoutMs = 240_000) {
@@ -291,10 +336,19 @@ try {
     check('shards: both exit 0', s1.status === 0 && s2.status === 0, `${s1.status}, ${s2.status}`);
     check('shards: one run key, shards 1/2 and 2/2', shardIdx.has('1/2') && shardIdx.has('2/2'), [...shardIdx].join(' '));
 
-    // 10. GitLab CI.
-    c = ciEnv({ provider: 'gitlab' });
-    r = await pw(p, '@pass', c.env);
-    check('gitlab: exit 0 and provider gitlab', r.status === 0 && payloads(c.runKey, 'run_started')[0]?.ci?.provider === 'gitlab', `got ${r.status}`);
+    // 10. Other CI providers: detected by name, one run key per pipeline, branch and commit from their variables.
+    for (const provider of ['gitlab', 'circleci', 'buildkite', 'azure', 'jenkins', 'bitbucket']) {
+      c = ciEnv({ provider });
+      r = await pw(p, '@pass', c.env);
+      const st = payloads(c.runKey, 'run_started')[0];
+      check(`${provider}: exit 0, provider and run key`, r.status === 0 && st?.ci?.provider === provider, `got ${r.status}, ${st ? JSON.stringify(st.ci) : `nothing under ${c.runKey}`}`);
+      check(`${provider}: commit from its variables`, String(st?.git?.commit ?? '').startsWith('sha'), String(st?.git?.commit));
+    }
+    // Parallel Bitbucket steps of one pipeline merge into one run.
+    c = ciEnv({ provider: 'bitbucket' });
+    await Promise.all([pw(p, '@pass', c.env, ['--shard=1/2']), pw(p, '@pass', c.env, ['--shard=2/2'])]);
+    const bb = new Set(eventsOf(c.runKey).map((e) => `${e.shardIndex}/${e.shardTotal}`));
+    check('bitbucket: parallel steps share one run', bb.has('1/2') && bb.has('2/2'), [...bb].join(' '));
 
     // 11. Repeated runs: exit code must be 0 every time (Windows exit-127 regression).
     const codes = [];
@@ -340,9 +394,90 @@ try {
       }
     })();
     check('mcp: 4 tools listed, clean exit', tools.length === 4 && mcp.status === 0, `${tools.join(',')} exit ${mcp.status}`);
+
+    // 14. HTTPS API behind a corporate proxy. The API host only exists inside the proxy (it maps
+    // api.compat.test to this machine), so a delivered run proves the CONNECT tunnel was used.
+    const tlsDir = path.join(root, 'tls');
+    mkdirSync(tlsDir, { recursive: true });
+    const keyFile = path.join(tlsDir, 'key.pem');
+    const certFile = path.join(tlsDir, 'cert.pem');
+    const ssl = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyFile, '-out', certFile, '-days', '2', '-subj', '/CN=api.compat.test', '-addext', 'subjectAltName=DNS:api.compat.test'], { encoding: 'utf8', env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
+    if (ssl.status !== 0) {
+      // In CI the proxy check must run; on a laptop without openssl it is reported as skipped.
+      check('proxy: openssl available for a test certificate', !process.env.GITHUB_ACTIONS, `SKIPPED: ${(ssl.stderr || String(ssl.error)).slice(0, 200)}`);
+    } else {
+      const httpsServer = track(createHttpsServer({ key: readFileSync(keyFile), cert: readFileSync(certFile) }, handle));
+      await new Promise((r) => httpsServer.listen(0, '127.0.0.1', r));
+      const httpsPort = httpsServer.address().port;
+      const tunnels = [];
+      const proxy = track(createServer((req, res) => res.writeHead(405).end()));
+      proxy.on('connect', (req, client, head) => {
+        tunnels.push({ target: req.url, auth: req.headers['proxy-authorization'] ?? null });
+        const [host, port] = req.url.split(':');
+        if (host !== 'api.compat.test') return client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        const upstream = connect(Number(port), '127.0.0.1', () => {
+          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          if (head?.length) upstream.write(head);
+          upstream.pipe(client);
+          client.pipe(upstream);
+        });
+        upstream.on('error', () => client.destroy());
+        client.on('error', () => upstream.destroy());
+      });
+      await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+      const PROXY = `127.0.0.1:${proxy.address().port}`;
+      const viaProxy = (proxyUrl) => ({ apiUrl: `https://api.compat.test:${httpsPort}`, extra: { HTTPS_PROXY: proxyUrl, NODE_EXTRA_CA_CERTS: certFile } });
+
+      c = ciEnv(viaProxy(`http://${PROXY}`));
+      r = await pw(p, '@pass', c.env);
+      check('proxy: exit 0', r.status === 0, `got ${r.status}`);
+      check('proxy: run delivered through the CONNECT tunnel', payloads(c.runKey, 'run_finished')[0]?.status === 'passed' && tunnels.some((t) => t.target === `api.compat.test:${httpsPort}`), `${tunnels.length} tunnels`);
+
+      const before = tunnels.length;
+      c = ciEnv(viaProxy(`http://ci-user:p%40ss@${PROXY}`));
+      r = await pw(p, '@pass', c.env);
+      const expected = `Basic ${Buffer.from('ci-user:p@ss').toString('base64')}`;
+      check('proxy with credentials: exit 0, delivered, Proxy-Authorization sent', r.status === 0 && payloads(c.runKey, 'run_finished').length === 1 && tunnels.slice(before).some((t) => t.auth === expected), tunnels.slice(before).map((t) => t.auth).join(','));
+
+      // API errors behind the proxy, then `turnsignal upload` through the same proxy recovers.
+      api.mode = '500';
+      c = ciEnv(viaProxy(`http://${PROXY}`));
+      clearSpool(p);
+      r = await pw(p, '@pass', c.env);
+      api.mode = 'ok';
+      const up = await ts(p, ['upload'], c.env);
+      check('proxy: API error then `turnsignal upload` through the proxy recovers', r.status === 0 && up.status === 0 && payloads(c.runKey, 'run_finished')[0]?.status === 'passed', `run ${r.status}, upload ${up.status}`);
+
+      // A proxy that is down: exit code unchanged, bounded time.
+      c = ciEnv(viaProxy(DEAD_URL));
+      r = await pw(p, '@pass', c.env);
+      check('proxy down: exit 0 in bounded time', r.status === 0 && r.ms < okMs + 30_000, `got ${r.status} in ${r.ms} ms`);
+      for (const s of api.sockets) s.destroy();
+      httpsServer.close();
+      proxy.close();
+    }
+
+    // 15. A real browser (BROWSER=1): a failing Chromium test's screenshot, video and trace upload.
+    if (BROWSER) {
+      const inst = await run(process.execPath, [p.pwCli, 'install', ...(process.platform === 'linux' ? ['--with-deps'] : []), 'chromium'], p.dir, process.env, 900_000);
+      check('browser: Chromium installed', inst.status === 0, inst.status === 0 ? '' : inst.out.slice(-300));
+      if (inst.status === 0) {
+        const before = api.presigned.length;
+        c = ciEnv({ extra: { COMPAT_BROWSER: '1' } });
+        r = await pw(p, '@browser', c.env);
+        const items = api.presigned.slice(before);
+        const kinds = new Set(items.map((i) => i.kind));
+        check('browser: exit code 1 kept', r.status === 1, `got ${r.status}`);
+        check('browser: screenshot, video and trace offered for upload', kinds.has('screenshot') && kinds.has('video') && kinds.has('trace'), [...kinds].join(','));
+        check('browser: every file uploaded with content', items.length > 0 && items.every((i) => (api.puts.get(i.id)?.length ?? 0) > 0), `${items.length} files`);
+        check('browser: uploads marked complete', items.every((i) => api.completed.includes(i.id)));
+        const magic = (kind, prefix) => items.filter((i) => i.kind === kind).every((i) => api.puts.get(i.id)?.subarray(0, prefix.length).equals(Buffer.from(prefix)));
+        check('browser: files are real (PNG, ZIP)', magic('screenshot', [0x89, 0x50, 0x4e, 0x47]) && magic('trace', [0x50, 0x4b]));
+      }
+    }
   }
 
-  // 14. ESM project ("type": "module").
+  // 16. ESM project ("type": "module").
   const e = makeProject('esm project', { esm: true });
   if (e) {
     const c = ciEnv();
