@@ -43,3 +43,33 @@ jobs:
           PW_VERSION: ${{ matrix.runtime.playwright }}
           REPEAT: '5'
         run: TARBALL="$(ls "$RUNNER_TEMP"/turnsignal-*.tgz)" node packages/turnsignal/test/compat/simulate.mjs
+
+  # Customers who install with pnpm (strict, symlinked node_modules) or yarn 1.
+  package-managers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        pm: [pnpm, yarn]
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} · ${{ matrix.pm }} · node 22 · playwright latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and pack the package
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm run package
+          cd packages/turnsignal && npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Simulate a customer's CI
+        shell: bash
+        env:
+          PM: ${{ matrix.pm }}
+          PW_VERSION: latest
+          REPEAT: '3'
+        run: TARBALL="$(ls "$RUNNER_TEMP"/turnsignal-*.tgz)" node packages/turnsignal/test/compat/simulate.mjs
